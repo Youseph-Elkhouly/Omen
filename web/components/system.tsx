@@ -5,3 +5,5 @@ export function ScoreRing({score}:{score:number}){const color=score>=85?'#63e6c1
 export function Tag({children}:{children:ReactNode}){return <span className="tag">{children}</span>}
 export function DeadlineBadge({date}:{date:string}){const days=Math.ceil((new Date(date).getTime()-Date.now())/86400000);return <span className={`deadline ${days<=3?'urgent':''}`}><i/>{days<0?'Closed':days===0?'Today':`${days}d left`}</span>}
 export function Skeleton(){return <div className="skeleton"/>}
+export type SaveState='saved'|'saving'|'unsaved'|'error';
+export function SaveBadge({state}:{state:SaveState}){return <span className={`save-badge ${state}`}>{state==='saving'?'Saving…':state==='unsaved'?'Unsaved':state==='error'?'Save failed':'Saved'}</span>}
