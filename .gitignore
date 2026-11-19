@@ -1,0 +1,29 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local secrets and runtime data
+.env
+.env.*
+!.env.example
+!web/.env.example
+*.sqlite3
+*.sqlite3-*
+.score_cache.sqlite3
+digests/
+
+# Node / Next.js
+node_modules/
+web/node_modules/
+web/.next/
+web/.next-dev/
+web/.next-*/
+web/out/
+web/.env.local
+
+# Editor and operating system
+.DS_Store
+.idea/
+.vscode/

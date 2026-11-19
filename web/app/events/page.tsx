@@ -1,0 +1,1 @@
+'use client';import {Workspace,EventListing} from '../../components/workspace';export default function EventsPage(){return <Workspace active="Events"><EventListing type="event" subhead="Upcoming events matched to your interests."/></Workspace>}

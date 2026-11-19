@@ -1,0 +1,1 @@
+'use client';import {Workspace,EventListing} from '../../components/workspace';export default function Hackathons(){return <Workspace active="Hackathons"><EventListing type="hackathon" subhead="Hackathons, build weekends, and student competitions."/></Workspace>}
