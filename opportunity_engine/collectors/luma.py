@@ -5,7 +5,7 @@ class Luma:
     ENDPOINT='https://api.lu.ma/discover/get-paginated-events'
     def __init__(self,queries=None,client=None,sleep=time.sleep):
         configured=queries if queries is not None else os.getenv('LUMA_QUERIES','')
-        self.queries=[q.strip() for q in configured.split(',') if q.strip()] or ['']
+        self.queries=[q.strip() for q in (configured.split(',') if isinstance(configured,str) else configured) if q.strip()] or ['']
         self.client=client or httpx.Client(timeout=30,headers={'User-Agent':os.getenv('COLLECTOR_USER_AGENT','Omen/0.1')})
         self.sleep=sleep
     def fetch(self):
