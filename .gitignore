@@ -13,6 +13,7 @@ __pycache__/
 *.sqlite3-*
 .score_cache.sqlite3
 digests/
+vault/
 
 # Node / Next.js
 node_modules/

@@ -3,9 +3,10 @@ from datetime import datetime,timezone
 from pathlib import Path
 from .models import Opportunity
 from .llm import complete_json
+from .vault import goals_path
 CACHE=Path('.score_cache.sqlite3')
 def profile_text():
- p=Path('opportunity_engine/profile/resume.json'); g=Path('opportunity_engine/profile/goals.md')
+ p=Path('opportunity_engine/profile/resume.json'); g=goals_path()
  return (p.read_text() if p.exists() else '{}')+'\nGOALS\n'+(g.read_text() if g.exists() else '')
 def hard_filter(o):
  now=datetime.now(timezone.utc)

@@ -1,31 +1,32 @@
 from __future__ import annotations
-import sqlite3, subprocess, sys, uuid, os
+import logging, sqlite3, subprocess, sys, uuid, os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
+from opportunity_engine import focus, vault
+from opportunity_engine.db import connect, db_path
 
 ROOT=Path(__file__).resolve().parents[1]
-DB=Path(os.getenv('OE_DB_PATH',str(ROOT/'opportunities.sqlite3'))).expanduser()
+DB=db_path()
+log=logging.getLogger(__name__)
 app=FastAPI(title='Omen API',version='0.1.0')
 app.add_middleware(CORSMiddleware,allow_origins=[x.strip() for x in os.getenv('WEB_ORIGINS','').split(',') if x.strip()],allow_origin_regex=os.getenv('WEB_ORIGIN_REGEX') or None,allow_methods=['*'],allow_headers=['*'])
 
-def db():
- c=sqlite3.connect(DB);c.row_factory=sqlite3.Row
- c.execute("ALTER TABLE opportunities ADD COLUMN stage TEXT DEFAULT 'saved'") if 'stage' not in [r[1] for r in c.execute('PRAGMA table_info(opportunities)')] else None
- c.execute("ALTER TABLE opportunities ADD COLUMN notes TEXT DEFAULT ''") if 'notes' not in [r[1] for r in c.execute('PRAGMA table_info(opportunities)')] else None
- c.execute('''CREATE TABLE IF NOT EXISTS people(id INTEGER PRIMARY KEY,name TEXT,role TEXT,organization TEXT,event_id INTEGER,why TEXT,links TEXT,state TEXT DEFAULT 'want_to_meet')''')
- c.execute('''CREATE TABLE IF NOT EXISTS x_posts(id INTEGER PRIMARY KEY,author TEXT,handle TEXT,text TEXT,topic TEXT,url TEXT,opportunity_id INTEGER,score INTEGER,created_at TEXT,source TEXT DEFAULT 'external')''')
- if 'source' not in [r[1] for r in c.execute('PRAGMA table_info(x_posts)')]: c.execute("ALTER TABLE x_posts ADD COLUMN source TEXT DEFAULT 'external'")
- c.commit();return c
+def db(): return connect()
+def write_note(entity,eid,notes=None):
+ try: vault.sync_entity(entity,eid,notes)
+ except Exception: log.exception('Could not update the vault note for %s %s',entity,eid)
 class OpportunityPatch(BaseModel):
  status:Literal['new','saved','applied','skipped','expired']|None=None
- stage:str|None=None
+ stage:Literal['saved','applied','going','attended','skipped']|None=None
  notes:str|None=None
 class Feedback(BaseModel): action:Literal['save','skip']
-class PersonPatch(BaseModel): state:Literal['want_to_meet','met']|None=None
+class PersonPatch(BaseModel):
+ state:Literal['want_to_meet','met']|None=None
+ notes:str|None=None
 
 @app.get('/opportunities')
 def opportunities(type:str|None=None,from_:str|None=Query(None,alias='from'),to:str|None=None,remote:bool|None=None,min_score:int=0,tags:str|None=None,sort:str='score',q:str|None=None):
@@ -48,16 +49,17 @@ def opportunity(oid:int):
 @app.patch('/opportunities/{oid}')
 def patch_opportunity(oid:int,p:OpportunityPatch):
  fields={k:v for k,v in p.model_dump(exclude_none=True).items()}
+ if 'stage' in fields and 'status' not in fields: fields['status']={'saved':'saved','skipped':'skipped'}.get(fields['stage'],'applied')
  if not fields: return opportunity(oid)
  c=db();c.execute('UPDATE opportunities SET '+','.join(f'{k}=?' for k in fields)+' WHERE id=?',(*fields.values(),oid));c.commit();exists=c.total_changes;c.close()
  if not exists:raise HTTPException(404,'Opportunity not found')
- return opportunity(oid)
+ write_note('opportunity',oid,fields.get('notes'));return opportunity(oid)
 @app.post('/opportunities/{oid}/feedback')
 def feedback(oid:int,p:Feedback): return patch_opportunity(oid,OpportunityPatch(status='saved' if p.action=='save' else 'skipped',stage='saved' if p.action=='save' else 'skipped'))
 @app.get('/profile')
 def profile():
  import json
- path=ROOT/'opportunity_engine/profile/resume.json'; goals=ROOT/'opportunity_engine/profile/goals.md'
+ path=ROOT/'opportunity_engine/profile/resume.json'; goals=vault.goals_path()
  return {'resume':json.loads(path.read_text()) if path.exists() else {},'goals':goals.read_text() if goals.exists() else ''}
 
 @app.get('/people')
@@ -65,8 +67,11 @@ def people():
  c=db();rows=[dict(r) for r in c.execute('SELECT p.*,o.title AS next_event FROM people p LEFT JOIN opportunities o ON o.id=p.event_id ORDER BY p.name')];c.close();return rows
 @app.patch('/people/{pid}')
 def patch_person(pid:int,p:PersonPatch):
- c=db();c.execute('UPDATE people SET state=? WHERE id=?',(p.state,pid));c.commit();r=c.execute('SELECT * FROM people WHERE id=?',(pid,)).fetchone();c.close()
+ fields=p.model_dump(exclude_none=True);c=db()
+ if fields:c.execute('UPDATE people SET '+','.join(f'{k}=?' for k in fields)+' WHERE id=?',(*fields.values(),pid));c.commit()
+ r=c.execute('SELECT * FROM people WHERE id=?',(pid,)).fetchone();c.close()
  if not r:raise HTTPException(404,'Person not found')
+ if fields:write_note('person',pid,fields.get('notes'))
  return dict(r)
 @app.get('/x/posts')
 def x_posts():
@@ -87,7 +92,7 @@ def today():
  picks=sorted([x for x in items if x.get('status')=='new' and x.get('type') in {'event','hackathon','competition','program','fellowship','other'}],key=lambda x:x.get('score') or 0,reverse=True)[:5]
  closing=[x for x in items if x.get('deadline') and x['deadline']<week and x['deadline']>now.isoformat()]
  saved=[x for x in items if x.get('status')=='saved'][:5]
- goal_file=ROOT/'opportunity_engine/profile/goals.md';goals=[line.strip() for line in goal_file.read_text().splitlines() if line.strip()] if goal_file.exists() else []
+ goals=vault.goals()
  return {'picks':picks,'deadlines':closing,'saved':saved,'goals':goals,'synced_at':now.isoformat()}
 @app.get('/calendar.ics')
 def calendar_ics():
@@ -120,3 +125,47 @@ def run_event_pipeline():
 @app.post('/pipeline/run',status_code=202)
 def pipeline_run(tasks:BackgroundTasks):
     job=str(uuid.uuid4());tasks.add_task(run_event_pipeline);return {'job_id':job,'status':'started'}
+
+
+class NoteBody(BaseModel):
+ body:str
+ frontmatter:dict|None=None
+class NoteRename(BaseModel):
+ model_config=ConfigDict(populate_by_name=True)
+ src:str=Field(alias='from')
+ to:str
+def note_call(fn,*a):
+ try: return fn(*a)
+ except ValueError as e: raise HTTPException(400,str(e))
+ except FileNotFoundError: raise HTTPException(404,'Note not found')
+ except FileExistsError: raise HTTPException(409,'A note already exists at that path')
+@app.get('/notes/tree')
+def notes_tree(): return vault.tree()
+@app.get('/notes/search')
+def notes_search(q:str='',limit:int=20): return vault.search(q,limit)
+@app.get('/notes/for/{entity}/{eid}')
+def notes_for(entity:Literal['opportunity','person','org'],eid:str):
+ try: return vault.get(vault.note_for(entity,eid))
+ except (KeyError,ValueError): raise HTTPException(404,f'No {entity} {eid}')
+@app.post('/notes/rename')
+def notes_rename(p:NoteRename): return note_call(vault.rename,p.src,p.to)
+@app.get('/notes')
+def get_note(path:str): return note_call(vault.get,path)
+@app.put('/notes')
+def put_note(path:str,p:NoteBody): return note_call(vault.save,path,p.body,p.frontmatter)
+@app.get('/graph')
+def graph(include:str|None=None,stages:str='saved,applied,going,attended'):
+ return focus.mark_graph(vault.graph([x.strip() for x in include.split(',') if x.strip()] if include else None,[x.strip() for x in stages.split(',') if x.strip()]))
+class TaskToggle(BaseModel):
+ path:str
+ hash:str
+ line:int|None=None
+ done:bool|None=None
+@app.get('/tasks')
+def tasks(status:Literal['open','done']|None=None,due_before:str|None=None): return vault.task_list(status,due_before)
+@app.patch('/tasks')
+def toggle_task(p:TaskToggle):
+ try: return note_call(vault.toggle_task,p.path,p.hash,p.done,p.line)
+ except LookupError as e: raise HTTPException(409,str(e))
+@app.get('/focus')
+def focus_view(): return focus.compute()
